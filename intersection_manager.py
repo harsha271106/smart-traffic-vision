@@ -1,5 +1,8 @@
 import cv2
 import numpy as np
+import time
+import csv
+import os
 from ultralytics import YOLO
 
 # Load YOLOv8 Model
@@ -75,23 +78,36 @@ def run_4way_intersection(video_path):
         print(f"Error: Could not open video file '{video_path}'.")
         return
 
-    # Heavily angled rightward perspective coordinates
+    # CSV Logging Setup
+    csv_file = 'traffic_performance_log.csv'
+    file_exists = os.path.isfile(csv_file)
+    log_file = open(csv_file, mode='a', newline='')
+    writer = csv.writer(log_file)
+
+    if not file_exists:
+        writer.writerow(['Timestamp', 'Frame_Index', 'Latency_ms', 'Lane1_Density', 'Lane2_Density', 'Lane3_Density', 'Lane4_Density', 'Active_Green_Lane', 'Emergency_Active'])
+
     lane_rois = [
-        [[400, 90], [445, 90], [380, 360], [250, 360]],  # Lane 1 (Left inner driving lane)
-        [[445, 90], [485, 90], [475, 360], [380, 360]],  # Lane 2 (Middle left)
-        [[485, 90], [530, 90], [565, 360], [475, 360]],  # Lane 3 (Middle right)
-        [[530, 90], [585, 90], [640, 360], [565, 360]]   # Lane 4 (Far right corridor)
+        [[400, 90], [445, 90], [380, 360], [250, 360]],  # Lane 1
+        [[445, 90], [485, 90], [475, 360], [380, 360]],  # Lane 2
+        [[485, 90], [530, 90], [565, 360], [475, 360]],  # Lane 3
+        [[530, 90], [585, 90], [640, 360], [565, 360]]   # Lane 4
     ]
     
     subtractors = [cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=30, detectShadows=False) for _ in range(4)]
     lane_names = ["LANE 1", "LANE 2", "LANE 3", "LANE 4"]
+    frame_index = 0
+
+    print("--- Running Multi-Lane Intersection Manager with CSV Logging ---")
 
     while cap.isOpened():
+        start_time = time.time()
         ret, frame = cap.read()
         if not ret:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             continue
 
+        frame_index += 1
         frame = cv2.resize(frame, (640, 360))
         densities = []
         emergencies = []
@@ -105,10 +121,21 @@ def run_4way_intersection(video_path):
             active_lane = emergencies.index(True)
             status_text = f"EMERGENCY OVERRIDE: {lane_names[active_lane]} GREEN"
             status_color = (0, 0, 255)
+            is_emergency_flag = 1
         else:
             active_lane = int(np.argmax(densities))
             status_text = f"DYNAMIC PRIORITY: {lane_names[active_lane]} GREEN"
             status_color = (0, 255, 0)
+            is_emergency_flag = 0
+
+        # Measure Frame Latency (ms)
+        end_time = time.time()
+        latency_ms = round((end_time - start_time) * 1000, 2)
+
+        # Write to CSV File
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        writer.writerow([current_time, frame_index, latency_ms, densities[0], densities[1], densities[2], densities[3], active_lane + 1, is_emergency_flag])
+        log_file.flush()
 
         # 1. Draw Sharply Angled Lane Boundaries
         for i in range(4):
@@ -135,6 +162,7 @@ def run_4way_intersection(video_path):
         if cv2.waitKey(20) & 0xFF == ord('q'):
             break
 
+    log_file.close()
     cap.release()
     cv2.destroyAllWindows()
 
