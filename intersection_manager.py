@@ -1,12 +1,15 @@
-import cv2
-import numpy as np
+import os
 import time
 import csv
-import os
+import cv2
+import numpy as np
 from ultralytics import YOLO
 
-# Load YOLOv8 Model
+# Default fallback model
 model = YOLO('yolov8n.pt')
+
+# COCO vehicle classes: 2: Car, 3: Motorcycle, 5: Bus, 7: Truck
+INDIAN_VEHICLE_CLASSES = [2, 3, 5, 7]
 
 strobe_history = []
 
@@ -17,11 +20,10 @@ def detect_emergency_flashing(vehicle_crop):
 
     hsv = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2HSV)
 
-    # Red & Blue HSV Masks
     lower_red1, upper_red1 = np.array([0, 150, 150]), np.array([10, 255, 255])
     lower_red2, upper_red2 = np.array([170, 150, 150]), np.array([180, 255, 255])
     mask_red = cv2.bitwise_or(cv2.inRange(hsv, lower_red1, upper_red1), 
-                             cv2.inRange(hsv, lower_red2, upper_red2))
+                              cv2.inRange(hsv, lower_red2, upper_red2))
 
     lower_blue, upper_blue = np.array([100, 170, 150]), np.array([140, 255, 255])
     mask_blue = cv2.inRange(hsv, lower_blue, upper_blue)
@@ -39,66 +41,105 @@ def detect_emergency_flashing(vehicle_crop):
     strobe_variance = np.std(strobe_history)
     return strobe_variance > 200.0 and np.max(strobe_history) > 150
 
-def check_emergency_yolo(frame_roi):
-    results = model(frame_roi, verbose=False)
-    for result in results:
+def check_emergency_yolo(frame, approach_roi_pts, yolo_results=None):
+    if yolo_results is None:
+        yolo_results = model(frame, verbose=False)
+
+    contour = approach_roi_pts.astype(np.float32)
+
+    for result in yolo_results:
         for box in result.boxes:
             class_id = int(box.cls[0])
             confidence = float(box.conf[0])
             
-            if class_id in [2, 5, 7] and confidence > 0.55:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                vehicle_crop = frame_roi[y1:y2, x1:x2]
+            if class_id in [2, 5, 7] and confidence > 0.50:
+                xyxy = box.xyxy[0].cpu().numpy()
+                cx = float((xyxy[0] + xyxy[2]) / 2.0)
+                cy = float(xyxy[3])
                 
-                if detect_emergency_flashing(vehicle_crop):
-                    return True
+                # Type-safe pointPolygonTest using float coordinates
+                if cv2.pointPolygonTest(contour, (cx, cy), False) >= 0:
+                    h, w = frame.shape[:2]
+                    x1, y1 = max(0, int(xyxy[0])), max(0, int(xyxy[1]))
+                    x2, y2 = min(w, int(xyxy[2])), min(h, int(xyxy[3]))
+                    
+                    vehicle_crop = frame[y1:y2, x1:x2]
+                    if detect_emergency_flashing(vehicle_crop):
+                        return True
     return False
 
-def process_lane_roi(frame, roi_points, bg_subtractor):
+def calculate_hybrid_density(frame, fg_clean, yolo_results, approach_roi_pts):
+    # 1. Base MOG2 Motion Pixel Density
     h, w = frame.shape[:2]
-    roi_mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(roi_mask, [np.array(roi_points, dtype=np.int32)], 255)
-    
-    frame_roi = cv2.bitwise_and(frame, frame, mask=roi_mask)
-    is_emergency = check_emergency_yolo(frame_roi)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [approach_roi_pts.astype(np.int32)], 255)
+    corridor_fg = cv2.bitwise_and(fg_clean, fg_clean, mask=mask)
+    pixel_density = cv2.countNonZero(corridor_fg)
 
-    fg_mask = bg_subtractor.apply(frame_roi)
-    fg_mask = cv2.GaussianBlur(fg_mask, (5, 5), 0)
+    # 2. Static Queue Density Floor via YOLOv8
+    yolo_density_boost = 0
+    vehicle_count = 0
+    contour = approach_roi_pts.astype(np.float32)
+    
+    if yolo_results and len(yolo_results[0].boxes) > 0:
+        for box in yolo_results[0].boxes:
+            cls = int(box.cls[0].cpu().numpy())
+            conf = float(box.conf[0].cpu().numpy())
+            
+            if cls in INDIAN_VEHICLE_CLASSES and conf > 0.35:
+                xyxy = box.xyxy[0].cpu().numpy()
+                cx = float((xyxy[0] + xyxy[2]) / 2.0)
+                cy = float(xyxy[3])
+                
+                if cv2.pointPolygonTest(contour, (cx, cy), False) >= 0:
+                    vehicle_count += 1
+                    if cls == 3:        # Two-Wheeler
+                        yolo_density_boost += 350
+                    elif cls in [5, 7]: # Bus / Heavy Truck
+                        yolo_density_boost += 2500
+                    else:               # Car / Auto-Rickshaw
+                        yolo_density_boost += 850
+
+    effective_density = max(pixel_density, yolo_density_boost)
+    return effective_density, vehicle_count
+
+def process_lane_roi(frame, roi_points, bg_subtractor, yolo_model=None):
+    roi_pts = np.array(roi_points, dtype=np.int32)
+    
+    blurred = cv2.GaussianBlur(frame, (5, 5), 0)
+    fg_mask = bg_subtractor.apply(blurred)
     kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     kernel_large = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel_small)
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_large)
+    fg_clean = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel_small)
+    fg_clean = cv2.morphologyEx(fg_clean, cv2.MORPH_CLOSE, kernel_large)
 
-    density_score = cv2.countNonZero(fg_mask)
+    active_yolo = yolo_model if yolo_model is not None else model
+    yolo_results = active_yolo(frame, verbose=False)
+
+    density_score, _ = calculate_hybrid_density(frame, fg_clean, yolo_results, roi_pts)
+    is_emergency = check_emergency_yolo(frame, roi_pts, yolo_results)
+
     return density_score, is_emergency
 
-def run_4way_intersection(video_path):
+def run_corridor_manager(video_path):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Error: Could not open video file '{video_path}'.")
         return
 
-    # CSV Logging Setup
     csv_file = 'traffic_performance_log.csv'
     file_exists = os.path.isfile(csv_file)
     log_file = open(csv_file, mode='a', newline='')
     writer = csv.writer(log_file)
 
     if not file_exists:
-        writer.writerow(['Timestamp', 'Frame_Index', 'Latency_ms', 'Lane1_Density', 'Lane2_Density', 'Lane3_Density', 'Lane4_Density', 'Active_Green_Lane', 'Emergency_Active'])
+        writer.writerow(['Timestamp', 'Frame_Index', 'Latency_ms', 'Corridor_Density', 'Signal_State', 'Emergency_Active'])
 
-    lane_rois = [
-        [[400, 90], [445, 90], [380, 360], [250, 360]],  # Lane 1
-        [[445, 90], [485, 90], [475, 360], [380, 360]],  # Lane 2
-        [[485, 90], [530, 90], [565, 360], [475, 360]],  # Lane 3
-        [[530, 90], [585, 90], [640, 360], [565, 360]]   # Lane 4
-    ]
-    
-    subtractors = [cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=30, detectShadows=False) for _ in range(4)]
-    lane_names = ["LANE 1", "LANE 2", "LANE 3", "LANE 4"]
+    approach_roi = [[410, 95], [560, 95], [550, 360], [150, 360]]
+    subtractor = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=30, detectShadows=False)
     frame_index = 0
 
-    print("--- Running Multi-Lane Intersection Manager with CSV Logging ---")
+    print("--- Running Corridor Traffic Manager with CSV Logging ---")
 
     while cap.isOpened():
         start_time = time.time()
@@ -109,55 +150,40 @@ def run_4way_intersection(video_path):
 
         frame_index += 1
         frame = cv2.resize(frame, (640, 360))
-        densities = []
-        emergencies = []
 
-        for i in range(4):
-            density, emergency = process_lane_roi(frame, lane_rois[i], subtractors[i])
-            densities.append(density)
-            emergencies.append(emergency)
+        density, emergency = process_lane_roi(frame, approach_roi, subtractor, model)
 
-        if any(emergencies):
-            active_lane = emergencies.index(True)
-            status_text = f"EMERGENCY OVERRIDE: {lane_names[active_lane]} GREEN"
+        if emergency:
+            signal_state = "GREEN"
+            status_text = "EMERGENCY OVERRIDE: GREEN"
             status_color = (0, 0, 255)
             is_emergency_flag = 1
-        else:
-            active_lane = int(np.argmax(densities))
-            status_text = f"DYNAMIC PRIORITY: {lane_names[active_lane]} GREEN"
+        elif density > 1200:
+            signal_state = "GREEN"
+            status_text = f"DYNAMIC FLOW: GREEN (Density: {density})"
             status_color = (0, 255, 0)
             is_emergency_flag = 0
+        else:
+            signal_state = "RED"
+            status_text = f"LOW DEMAND: RED (Density: {density})"
+            status_color = (0, 0, 255)
+            is_emergency_flag = 0
 
-        # Measure Frame Latency (ms)
         end_time = time.time()
         latency_ms = round((end_time - start_time) * 1000, 2)
 
-        # Write to CSV File
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-        writer.writerow([current_time, frame_index, latency_ms, densities[0], densities[1], densities[2], densities[3], active_lane + 1, is_emergency_flag])
+        writer.writerow([current_time, frame_index, latency_ms, density, signal_state, is_emergency_flag])
         log_file.flush()
 
-        # 1. Draw Sharply Angled Lane Boundaries
-        for i in range(4):
-            pts = np.array(lane_rois[i], dtype=np.int32)
-            is_active = (i == active_lane)
-            box_color = (0, 255, 0) if is_active else (0, 0, 255)
-            cv2.polylines(frame, [pts], isClosed=True, color=box_color, thickness=2)
+        pts = np.array(approach_roi, dtype=np.int32)
+        box_color = (0, 255, 0) if signal_state == "GREEN" else (0, 0, 255)
+        cv2.polylines(frame, [pts], isClosed=True, color=box_color, thickness=2)
 
-        # 2. Draw Top Main Status Banner
-        cv2.rectangle(frame, (10, 10), (370, 45), (0, 0, 0), -1)
-        cv2.putText(frame, status_text, (15, 32),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, status_color, 2)
+        cv2.rectangle(frame, (10, 10), (390, 45), (0, 0, 0), -1)
+        cv2.putText(frame, status_text, (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.48, status_color, 2)
 
-        # 3. Draw Side Overlay Box for Individual Lane Stats
-        cv2.rectangle(frame, (500, 10), (630, 105), (0, 0, 0), -1)
-        for i in range(4):
-            is_active = (i == active_lane)
-            text_color = (0, 255, 0) if is_active else (0, 0, 255)
-            cv2.putText(frame, f"L{i+1}: {densities[i]} px", (510, 28 + (i * 18)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_color, 1)
-
-        cv2.imshow("Multi-Lane Smart Traffic Management System", frame)
+        cv2.imshow("Smart Traffic Corridor Controller", frame)
 
         if cv2.waitKey(20) & 0xFF == ord('q'):
             break
@@ -167,4 +193,4 @@ def run_4way_intersection(video_path):
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    run_4way_intersection('Light_Traffic.mp4')
+    run_corridor_manager('Light_Traffic.mp4')
