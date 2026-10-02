@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import random
 import threading
 import tkinter as tk
@@ -70,10 +69,10 @@ def run():
     ui_thread = threading.Thread(target=launch_dispatch_ui, daemon=True)
     ui_thread.start()
 
-    traci.start([SUMO_BINARY, "-c", SUMO_CONFIG, "--start"])
+    traci.start([SUMO_BINARY, "-c", SUMO_CONFIG, "--lateral-resolution", "0.5", "--start"])
 
     print("\n" + "=" * 70)
-    print("      LIVE SIGNAL CONTROLLER & GREEN DURATION LOGGER")
+    print("   LIVE CONTROLLER: INDIAN HETEROGENEOUS SUBLANE SIMULATION")
     print("=" * 70 + "\n")
 
     step = 0
@@ -104,18 +103,27 @@ def run():
                 amb_counter += 1
                 amb_id = f"ambulance_{direction}_{amb_counter}"
                 try:
-                    traci.vehicle.add(amb_id, routes[direction], typeID="ambulance", depart="now", departLane="random")
+                    traci.vehicle.add(amb_id, routes[direction], typeID="ambulance", depart="now")
                     traci.vehicle.setColor(amb_id, (255, 0, 0, 255))
+                    lat_pos = random.choice([-0.8, -0.4, 0.0, 0.4, 0.8])
+                    traci.vehicle.setLateralLanePosition(amb_id, lat_pos)
                     print(f"[{sim_time:5.1f}s] [DISPATCH] {amb_id} injected on {direction} corridor.")
                 except Exception as e:
-                    pass
+                    print(f"[ERROR adding ambulance]: {e}")
 
-        if step % 8 == 0:
+        # Inject mixed traffic every 6 steps (~0.6 seconds)
+        if step % 6 == 0:
             veh_counter += 1
-            v_type = random.choices(["bike", "auto", "car", "bus"], weights=[0.50, 0.25, 0.18, 0.07])[0]
+            v_type = random.choices(["bike", "auto", "car", "bus"], weights=[0.55, 0.25, 0.15, 0.05])[0]
             r = random.choice(["N", "S", "E", "W"])
+            veh_id = f"veh_{veh_counter}"
             try:
-                traci.vehicle.add(f"veh_{veh_counter}", routes[r], typeID=v_type, depart="now", departLane="random")
+                # Spawn across lanes 0 and 1
+                lane_idx = random.choice([0, 1])
+                traci.vehicle.add(veh_id, routes[r], typeID=v_type, depart="now", departLane=str(lane_idx))
+                # Squeeze vehicle laterally to create multi-vehicle abreast formation
+                lat_pos = random.choice([-0.9, -0.5, 0.0, 0.5, 0.9]) if v_type in ["bike", "auto"] else 0.0
+                traci.vehicle.setLateralLanePosition(veh_id, lat_pos)
             except Exception:
                 pass
 

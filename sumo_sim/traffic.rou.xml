@@ -1,39 +1,26 @@
 <routes>
-    <!-- Indian Heterogeneous Vehicle Types with Sublane Parameters -->
-    <!-- 
-      latAlignment="compact" or "arbitrary": Allows vehicles to pack side-by-side
-      minGapLat: Minimum lateral distance allowed between vehicles (in meters)
-      maxSpeedLatFactor: How aggressively they change lateral position/filter
-    -->
+    <vType id="bike" vClass="motorcycle" length="1.8" width="0.75" maxSpeed="16.0" 
+           minGapLat="0.10" maxSpeedLat="2.5" latAlignment="arbitrary" 
+           lcSublane="2.0" lcPushy="1.0" lcAssertive="1.0" accel="3.0" decel="5.0" color="0,255,0"/>
 
-    <!-- Two-Wheeler (Motorcycle/Scooter): Very narrow (0.7m), weaves and filters aggressively -->
-    <vType id="bike" vClass="motorcycle" length="1.9" width="0.7" maxSpeed="15.0" accel="2.8" decel="4.5" 
-           color="0.2,0.8,0.2" guiShape="motorcycle" 
-           latAlignment="arbitrary" minGapLat="0.2" maxSpeedLatFactor="1.5" lcPushy="0.8" lcAssertive="1.0" />
+    <vType id="auto" vClass="passenger" length="2.6" width="1.25" maxSpeed="12.5" 
+           minGapLat="0.18" maxSpeedLat="1.8" latAlignment="compact" 
+           lcSublane="1.8" lcPushy="0.9" lcAssertive="0.9" accel="2.2" decel="4.5" color="255,255,0"/>
 
-    <!-- Auto-Rickshaw (Three-Wheeler): Intermediate width (1.4m), high assertiveness -->
-    <vType id="auto" length="2.8" width="1.4" maxSpeed="12.0" accel="2.0" decel="3.8" 
-           color="1.0,0.8,0.0" guiShape="evehicle" 
-           latAlignment="compact" minGapLat="0.3" maxSpeedLatFactor="1.2" lcPushy="0.6" lcAssertive="0.8" />
+    <vType id="car" vClass="passenger" length="4.2" width="1.80" maxSpeed="15.0" 
+           minGapLat="0.25" maxSpeedLat="1.2" latAlignment="compact" 
+           lcSublane="1.2" lcPushy="0.6" lcAssertive="0.6" accel="2.2" decel="4.5" color="255,255,255"/>
 
-    <!-- Passenger Car: Standard width (1.8m) -->
-    <vType id="car" vClass="passenger" length="4.3" width="1.8" maxSpeed="16.0" accel="2.5" decel="4.5" 
-           color="0.7,0.7,0.7" guiShape="passenger" 
-           latAlignment="compact" minGapLat="0.4" maxSpeedLatFactor="1.0" lcPushy="0.4" />
+    <vType id="bus" vClass="bus" length="10.5" width="2.5" maxSpeed="11.0" 
+           minGapLat="0.30" maxSpeedLat="0.8" latAlignment="center" 
+           lcSublane="1.0" accel="1.2" decel="3.5" color="255,140,0"/>
 
-    <!-- City Bus / Truck: Wide (2.5m), maintains center alignment -->
-    <vType id="bus" vClass="bus" length="10.0" width="2.5" maxSpeed="10.0" accel="1.2" decel="3.0" 
-           color="0.9,0.4,0.0" guiShape="bus" 
-           latAlignment="center" minGapLat="0.5" />
+    <vType id="ambulance" vClass="emergency" length="5.5" width="2.0" maxSpeed="20.0" 
+           minGapLat="0.15" maxSpeedLat="2.5" latAlignment="arbitrary" 
+           lcSublane="2.0" lcPushy="1.0" lcAssertive="1.0" accel="3.2" decel="5.0" color="255,0,0"/>
 
-    <!-- Emergency Vehicle (Ambulance): 2.0m wide, high lateral aggressiveness to pass -->
-    <vType id="ambulance" vClass="emergency" length="5.5" width="2.0" maxSpeed="20.0" accel="3.5" decel="5.0" 
-           color="1,0,0" guiShape="emergency" 
-           latAlignment="compact" minGapLat="0.3" maxSpeedLatFactor="1.8" lcPushy="1.0" lcAssertive="1.5" />
-
-    <!-- Routes -->
-    <route id="r_S" edges="S2C C2N" />
     <route id="r_N" edges="N2C C2S" />
-    <route id="r_W" edges="W2C C2E" />
+    <route id="r_S" edges="S2C C2N" />
     <route id="r_E" edges="E2C C2W" />
+    <route id="r_W" edges="W2C C2E" />
 </routes>

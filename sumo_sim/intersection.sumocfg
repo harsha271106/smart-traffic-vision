@@ -3,8 +3,15 @@
         <net-file value="intersection.net.xml"/>
         <route-files value="traffic.rou.xml"/>
     </input>
+    <processing>
+        <lateral-resolution value="0.5"/>
+        <collision.action value="none"/>
+    </processing>
     <time>
         <begin value="0"/>
         <step-length value="0.1"/>
     </time>
+    <gui_only>
+        <start value="true"/>
+    </gui_only>
 </configuration>
