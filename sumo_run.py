@@ -1,192 +1,248 @@
+"""
+Smart Traffic Management Framework and Logic Simulation
+Controller: Direct-State 4-Way Controller with Anti-Deadlock Clearance & Instant Preemption
+Calibrated for SUMO Left-Hand Traffic (LHT) Link Mapping: [0-3: SOUTH] [4-7: EAST] [8-11: NORTH] [12-15: WEST]
+"""
+
 import os
 import sys
-import random
+import time
 import threading
 import tkinter as tk
+from tkinter import ttk
 
+# Verify SUMO_HOME path
 if 'SUMO_HOME' in os.environ:
     tools = os.path.join(os.environ['SUMO_HOME'], 'tools')
     sys.path.append(tools)
 else:
-    sys.exit("Error: SUMO_HOME environment variable is not defined.")
+    sys.exit("Please declare environment variable 'SUMO_HOME'")
 
 import traci
 
-SUMO_BINARY = "sumo-gui"
-SUMO_CONFIG = "sumo_sim/intersection.sumocfg"
-if not os.path.exists(SUMO_CONFIG):
-    SUMO_CONFIG = "intersection.sumocfg"
-
-TL_ID = "center"
-PHASE_NS_GREEN = 0
-PHASE_NS_YELLOW = 1
-PHASE_EW_GREEN = 2
-PHASE_EW_YELLOW = 3
-
-YELLOW_TIME = 4.0
+# Operational Constants
+TLS_ID = "C"
 MIN_GREEN = 15.0
 MAX_GREEN = 60.0
+YELLOW_TIME = 3.0
+ALPHA_QUEUE = 2.0
 
-dispatch_queue = []
+# 16-character signal state strings calibrated to netconvert LHT link layout
+# Verified Bit Blocks: [0-3: SOUTH] [4-7: EAST] [8-11: NORTH] [12-15: WEST]
+STATES = {
+    "NORTH": {
+        "green":  "rrrr" + "rrrr" + "GGGG" + "rrrr",
+        "yellow": "rrrr" + "rrrr" + "yyyy" + "rrrr",
+        "edge": "N2C",
+        "route_str": "r_N_straight",
+        "route_lt":  "r_N_left",
+        "route_rt":  "r_N_right"
+    },
+    "EAST": {
+        "green":  "rrrr" + "GGGG" + "rrrr" + "rrrr",
+        "yellow": "rrrr" + "yyyy" + "rrrr" + "rrrr",
+        "edge": "E2C",
+        "route_str": "r_E_straight",
+        "route_lt":  "r_E_left",
+        "route_rt":  "r_E_right"
+    },
+    "SOUTH": {
+        "green":  "GGGG" + "rrrr" + "rrrr" + "rrrr",
+        "yellow": "yyyy" + "rrrr" + "rrrr" + "rrrr",
+        "edge": "S2C",
+        "route_str": "r_S_straight",
+        "route_lt":  "r_S_left",
+        "route_rt":  "r_S_right"
+    },
+    "WEST": {
+        "green":  "rrrr" + "rrrr" + "rrrr" + "GGGG",
+        "yellow": "rrrr" + "rrrr" + "rrrr" + "yyyy",
+        "edge": "W2C",
+        "route_str": "r_W_straight",
+        "route_lt":  "r_W_left",
+        "route_rt":  "r_W_right"
+    }
+}
 
-def launch_dispatch_ui():
+ORDER = ["NORTH", "EAST", "SOUTH", "WEST"]
+
+# Global Preemption State Variables
+amb_counter = 0
+emergency_requested = False
+target_corridor = None
+active_ambulance_id = None
+serviced_ambulances = set()
+
+
+def inject_ambulance(corridor_key, route_type="straight"):
+    """Dispatches an ambulance on the selected corridor and forces immediate preemption."""
+    global amb_counter, emergency_requested, target_corridor, active_ambulance_id
+    amb_counter += 1
+    
+    if route_type == "left":
+        route_id = STATES[corridor_key]["route_lt"]
+    elif route_type == "right":
+        route_id = STATES[corridor_key]["route_rt"]
+    else:
+        route_id = STATES[corridor_key]["route_str"]
+
+    amb_id = f"ambulance_{corridor_key[:1]}_{amb_counter}"
+    try:
+        traci.vehicle.add(
+            vehID=amb_id,
+            routeID=route_id,
+            typeID="ambulance",
+            depart="now",
+            departLane="best",
+            departSpeed="max"
+        )
+        traci.vehicle.setSpeedMode(amb_id, 31)
+        
+        target_corridor = corridor_key
+        emergency_requested = True
+        active_ambulance_id = amb_id
+        print(f"\n🚨 [MANUAL DISPATCH] {amb_id} injected on {corridor_key} ({route_type}). Forcing Preemption.")
+    except Exception as e:
+        print(f"Error injecting ambulance: {e}")
+
+
+def launch_dispatch_gui():
+    """Tkinter control window for triggering emergency vehicles."""
     root = tk.Tk()
     root.title("Emergency Dispatch Panel")
-    root.geometry("300x340")
+    root.geometry("380x320")
     root.resizable(False, False)
-    try:
-        root.attributes("-topmost", True)
-    except Exception:
-        pass
 
-    tk.Label(root, text="EMERGENCY DISPATCH", font=("Arial", 11, "bold")).pack(pady=10)
-    tk.Label(root, text="Inject priority ambulance:", font=("Arial", 9)).pack(pady=2)
+    ttk.Label(root, text="Instant Preemption Controls", font=("Helvetica", 11, "bold")).pack(pady=8)
 
-    def trigger(corridor):
-        dispatch_queue.append(corridor)
+    btn_frame = ttk.Frame(root)
+    btn_frame.pack(pady=5)
 
-    btn_frame = tk.Frame(root)
-    btn_frame.pack(pady=10)
+    ttk.Button(btn_frame, text="🚨 North (Straight)", command=lambda: inject_ambulance("NORTH", "straight")).grid(row=0, column=0, padx=5, pady=4)
+    ttk.Button(btn_frame, text="North (Left)", command=lambda: inject_ambulance("NORTH", "left")).grid(row=0, column=1, padx=5, pady=4)
 
-    tk.Button(btn_frame, text="Dispatch North (N)", width=20, bg="#d9534f", fg="white", font=("Arial", 9, "bold"),
-              command=lambda: trigger("N")).pack(pady=4)
-    tk.Button(btn_frame, text="Dispatch South (S)", width=20, bg="#d9534f", fg="white", font=("Arial", 9, "bold"),
-              command=lambda: trigger("S")).pack(pady=4)
-    tk.Button(btn_frame, text="Dispatch East (E)", width=20, bg="#d9534f", fg="white", font=("Arial", 9, "bold"),
-              command=lambda: trigger("E")).pack(pady=4)
-    tk.Button(btn_frame, text="Dispatch West (W)", width=20, bg="#d9534f", fg="white", font=("Arial", 9, "bold"),
-              command=lambda: trigger("W")).pack(pady=4)
-    tk.Button(btn_frame, text="Dispatch All 4 Ways", width=20, bg="#c9302c", fg="white", font=("Arial", 9, "bold"),
-              command=lambda: trigger("ALL")).pack(pady=6)
+    ttk.Button(btn_frame, text="🚨 East (Straight)", command=lambda: inject_ambulance("EAST", "straight")).grid(row=1, column=0, padx=5, pady=4)
+    ttk.Button(btn_frame, text="East (Right)", command=lambda: inject_ambulance("EAST", "right")).grid(row=1, column=1, padx=5, pady=4)
 
+    ttk.Button(btn_frame, text="🚨 South (Straight)", command=lambda: inject_ambulance("SOUTH", "straight")).grid(row=2, column=0, padx=5, pady=4)
+    ttk.Button(btn_frame, text="South (Left)", command=lambda: inject_ambulance("SOUTH", "left")).grid(row=2, column=1, padx=5, pady=4)
+
+    ttk.Button(btn_frame, text="🚨 West (Straight)", command=lambda: inject_ambulance("WEST", "straight")).grid(row=3, column=0, padx=5, pady=4)
+    ttk.Button(btn_frame, text="West (Right)", command=lambda: inject_ambulance("WEST", "right")).grid(row=3, column=1, padx=5, pady=4)
+
+    ttk.Button(root, text="🔥 Dispatch All 4 Approaches", 
+               command=lambda: [inject_ambulance(c, "straight") for c in ORDER]).pack(pady=10)
     root.mainloop()
 
-def log_phase(axis_name, start_t, end_t, reason):
-    dur = end_t - start_t
-    print(f"[PHASE LOG] Axis: {axis_name:<10} | Started: {start_t:5.1f}s | Ended: {end_t:5.1f}s | Green Duration: {dur:4.1f}s ({reason})")
 
-def run():
-    ui_thread = threading.Thread(target=launch_dispatch_ui, daemon=True)
-    ui_thread.start()
+def run_simulation():
+    global emergency_requested, target_corridor, active_ambulance_id
 
-    traci.start([SUMO_BINARY, "-c", SUMO_CONFIG, "--lateral-resolution", "0.5", "--start"])
+    sumo_binary = "sumo-gui"
+    config_path = os.path.join("sumo_sim", "intersection.sumocfg")
+    
+    cmd = [sumo_binary, "-c", config_path, "--start", "--quit-on-end"]
+    traci.start(cmd)
 
-    print("\n" + "=" * 70)
-    print("   LIVE CONTROLLER: INDIAN HETEROGENEOUS SUBLANE SIMULATION")
-    print("=" * 70 + "\n")
+    gui_thread = threading.Thread(target=launch_dispatch_gui, daemon=True)
+    gui_thread.start()
 
-    step = 0
-    veh_counter = 0
-    amb_counter = 0
-
-    current_phase = PHASE_EW_GREEN
-    traci.trafficlight.setPhase(TL_ID, current_phase)
+    current_idx = 0
+    current_corridor = ORDER[current_idx]
+    
+    # Initialize junction state
+    traci.trafficlight.setRedYellowGreenState(TLS_ID, STATES[current_corridor]["green"])
     phase_start_time = 0.0
-    allocated_green = 30.0
     in_yellow = False
     yellow_start_time = 0.0
-    target_green_phase = PHASE_EW_GREEN
-    active_preemption = False
-    reason_label = "Initial Cycle"
+    allocated_green = MIN_GREEN
 
-    routes = {"N": "r_N", "S": "r_S", "E": "r_E", "W": "r_W"}
-
-    for _ in range(36000):
+    while traci.simulation.getMinExpectedNumber() > 0:
         traci.simulationStep()
-        step += 1
         sim_time = traci.simulation.getTime()
 
-        while dispatch_queue:
-            req = dispatch_queue.pop(0)
-            targets = ["N", "S", "E", "W"] if req == "ALL" else [req]
-            for direction in targets:
-                amb_counter += 1
-                amb_id = f"ambulance_{direction}_{amb_counter}"
-                try:
-                    traci.vehicle.add(amb_id, routes[direction], typeID="ambulance", depart="now")
-                    traci.vehicle.setColor(amb_id, (255, 0, 0, 255))
-                    lat_pos = random.choice([-0.8, -0.4, 0.0, 0.4, 0.8])
-                    traci.vehicle.setLateralLanePosition(amb_id, lat_pos)
-                    print(f"[{sim_time:5.1f}s] [DISPATCH] {amb_id} injected on {direction} corridor.")
-                except Exception as e:
-                    print(f"[ERROR adding ambulance]: {e}")
+        # Step 1: Track if ambulance reached the junction center or exit edge
+        if active_ambulance_id and active_ambulance_id in traci.vehicle.getIDList():
+            road = traci.vehicle.getRoadID(active_ambulance_id)
+            if road.startswith(":") or road.startswith("C2"):
+                serviced_ambulances.add(active_ambulance_id)
+                print(f"[{sim_time:.1f}s] [CLEARANCE] Ambulance cleared junction. Resuming standard cycles.")
+                active_ambulance_id = None
+                emergency_requested = False
+                target_corridor = None
 
-        # Inject mixed traffic every 6 steps (~0.6 seconds)
-        if step % 6 == 0:
-            veh_counter += 1
-            v_type = random.choices(["bike", "auto", "car", "bus"], weights=[0.55, 0.25, 0.15, 0.05])[0]
-            r = random.choice(["N", "S", "E", "W"])
-            veh_id = f"veh_{veh_counter}"
-            try:
-                # Spawn across lanes 0 and 1
-                lane_idx = random.choice([0, 1])
-                traci.vehicle.add(veh_id, routes[r], typeID=v_type, depart="now", departLane=str(lane_idx))
-                # Squeeze vehicle laterally to create multi-vehicle abreast formation
-                lat_pos = random.choice([-0.9, -0.5, 0.0, 0.5, 0.9]) if v_type in ["bike", "auto"] else 0.0
-                traci.vehicle.setLateralLanePosition(veh_id, lat_pos)
-            except Exception:
-                pass
+        # Step 2: Auto-detect scheduled or flowing ambulances across all corridors
+        if not emergency_requested:
+            for edge_id in ["N2C", "E2C", "S2C", "W2C"]:
+                for v in traci.edge.getLastStepVehicleIDs(edge_id):
+                    if traci.vehicle.getTypeID(v) == "ambulance" and v not in serviced_ambulances:
+                        for c_name, c_data in STATES.items():
+                            if c_data["edge"] == edge_id:
+                                target_corridor = c_name
+                                emergency_requested = True
+                                active_ambulance_id = v
+                                print(f"\n🚨 [AUTO-DETECT] Ambulance {v} detected on {c_name} approach. Initiating preemption.")
+                                break
+                    if emergency_requested:
+                        break
+                if emergency_requested:
+                    break
 
-        ns_amb = any(traci.vehicle.getTypeID(v) == "ambulance" for edge in ["N2C", "S2C"] for v in traci.edge.getLastStepVehicleIDs(edge))
-        ew_amb = any(traci.vehicle.getTypeID(v) == "ambulance" for edge in ["E2C", "W2C"] for v in traci.edge.getLastStepVehicleIDs(edge))
+        # Step 3: Handle Emergency Preemption Interrupt & Unblock Lead Vehicles
+        if emergency_requested and target_corridor:
+            target_edge = STATES[target_corridor]["edge"]
+            for v in traci.edge.getLastStepVehicleIDs(target_edge):
+                traci.vehicle.setSpeedMode(v, 31)
+                traci.vehicle.setLaneChangeMode(v, 0)
 
-        ns_q = traci.edge.getLastStepHaltingNumber("N2C") + traci.edge.getLastStepHaltingNumber("S2C")
-        ew_q = traci.edge.getLastStepHaltingNumber("E2C") + traci.edge.getLastStepHaltingNumber("W2C")
+            if current_corridor == target_corridor and not in_yellow:
+                allocated_green = (sim_time - phase_start_time) + 20.0
+            else:
+                if not in_yellow:
+                    in_yellow = True
+                    yellow_start_time = sim_time
+                    traci.trafficlight.setRedYellowGreenState(TLS_ID, STATES[current_corridor]["yellow"])
+                    print(f"[{sim_time:.1f}s] [PREEMPTION CUT] {current_corridor} interrupted. Yellow clearance active.")
 
-        if (ns_amb or ew_amb) and not in_yellow:
-            if ns_amb and current_phase == PHASE_EW_GREEN:
-                print(f"[{sim_time:5.1f}s] [PREEMPTION] Incoming NS Ambulance! Scheduling Yellow Clearance.")
+        # Step 4: Normal Dynamic Cycle, Anti-Starvation & Queue-Flow Acceleration
+        if not in_yellow:
+            active_edge = STATES[current_corridor]["edge"]
+            
+            # Smooth out queue flow so turning vehicles do not stall at yield points
+            for v in traci.edge.getLastStepVehicleIDs(active_edge):
+                traci.vehicle.setSpeedMode(v, 31)
+
+            q = traci.edge.getLastStepHaltingNumber(active_edge)
+            if not emergency_requested:
+                allocated_green = min(MAX_GREEN, max(MIN_GREEN, MIN_GREEN + (ALPHA_QUEUE * q)))
+
+            # If green period expires, transition to yellow
+            if (sim_time - phase_start_time) >= allocated_green:
                 in_yellow = True
                 yellow_start_time = sim_time
-                target_green_phase = PHASE_NS_GREEN
-                traci.trafficlight.setPhase(TL_ID, PHASE_EW_YELLOW)
-                current_phase = PHASE_EW_YELLOW
-                log_phase("East-West", phase_start_time, sim_time, "Preempted by NS Ambulance")
-                active_preemption = True
-                reason_label = "NS Emergency Priority Window"
+                traci.trafficlight.setRedYellowGreenState(TLS_ID, STATES[current_corridor]["yellow"])
 
-            elif ew_amb and current_phase == PHASE_NS_GREEN:
-                print(f"[{sim_time:5.1f}s] [PREEMPTION] Incoming EW Ambulance! Scheduling Yellow Clearance.")
-                in_yellow = True
-                yellow_start_time = sim_time
-                target_green_phase = PHASE_EW_GREEN
-                traci.trafficlight.setPhase(TL_ID, PHASE_NS_YELLOW)
-                current_phase = PHASE_NS_YELLOW
-                log_phase("North-South", phase_start_time, sim_time, "Preempted by EW Ambulance")
-                active_preemption = True
-                reason_label = "EW Emergency Priority Window"
-
-            elif (ns_amb and current_phase == PHASE_NS_GREEN) or (ew_amb and current_phase == PHASE_EW_GREEN):
-                allocated_green = max(allocated_green, (sim_time - phase_start_time) + 20.0)
-
-        if in_yellow:
-            if sim_time - yellow_start_time >= YELLOW_TIME:
-                in_yellow = False
-                current_phase = target_green_phase
-                traci.trafficlight.setPhase(TL_ID, current_phase)
-                phase_start_time = sim_time
-                if active_preemption:
-                    allocated_green = 25.0
-                    active_preemption = False
-                else:
-                    q = ns_q if current_phase == PHASE_NS_GREEN else ew_q
-                    allocated_green = min(MAX_GREEN, max(MIN_GREEN, 15.0 + (2.5 * q)))
-                    reason_label = f"Density Responsive (Queue: {q})"
         else:
-            if sim_time - phase_start_time >= allocated_green:
-                in_yellow = True
-                yellow_start_time = sim_time
-                if current_phase == PHASE_NS_GREEN:
-                    traci.trafficlight.setPhase(TL_ID, PHASE_NS_YELLOW)
-                    target_green_phase = PHASE_EW_GREEN
-                    log_phase("North-South", phase_start_time, sim_time, reason_label)
+            # Yellow clearance interval
+            if (sim_time - yellow_start_time) >= YELLOW_TIME:
+                in_yellow = False
+                phase_start_time = sim_time
+
+                # Give immediate priority to preemption target
+                if emergency_requested and target_corridor:
+                    current_corridor = target_corridor
+                    current_idx = ORDER.index(target_corridor)
+                    allocated_green = 30.0
+                    print(f"[{sim_time:.1f}s] [GREEN GRANTED] Emergency green active for: {current_corridor}")
                 else:
-                    traci.trafficlight.setPhase(TL_ID, PHASE_EW_YELLOW)
-                    target_green_phase = PHASE_NS_GREEN
-                    log_phase("East-West", phase_start_time, sim_time, reason_label)
-                current_phase = current_phase + 1
+                    # Sequential round-robin advance (N -> E -> S -> W)
+                    current_idx = (current_idx + 1) % 4
+                    current_corridor = ORDER[current_idx]
+
+                traci.trafficlight.setRedYellowGreenState(TLS_ID, STATES[current_corridor]["green"])
 
     traci.close()
 
+
 if __name__ == "__main__":
-    run()
+    run_simulation()
